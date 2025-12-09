@@ -16,12 +16,13 @@ COPY . .
 # Build the project
 RUN npm run build
 
-# Expose any ports if needed (optional)
+# Expose port 3000 for potential HTTP endpoints (optional)
+EXPOSE 3000
 
 # Set environment variables from Docker if desired (they can also be set externally)
-# ENV METABASE_URL=https://your-metabase-instance.com \
-#     METABASE_USERNAME=your_username \
-#     METABASE_PASSWORD=your_password
+ENV METABASE_URL=https://metrics.letsweel.com \
+    METABASE_USERNAME=anna@letsweel.com \
+    METABASE_PASSWORD=
 
 # Use the node binary to run the built server
 CMD ["node", "build/index.js"]

@@ -27,6 +27,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import axios, { AxiosInstance } from "axios";
+import express, { Request, Response } from "express";
+import cors from "cors";
 
 // 自定义错误枚举
 enum ErrorCode {
@@ -72,6 +74,8 @@ class MetabaseServer {
   private server: Server;
   private axiosInstance: AxiosInstance;
   private sessionToken: string | null = null;
+  private httpApp: express.Application;
+  private httpPort: number = parseInt(process.env.HTTP_PORT || '3000');
 
   constructor() {
     this.server = new Server(
@@ -108,6 +112,8 @@ class MetabaseServer {
       throw new Error("Metabase authentication credentials not provided or incomplete.");
     }
 
+    this.httpApp = express();
+    this.setupHttpServer();
     this.setupResourceHandlers();
     this.setupToolHandlers();
     
@@ -159,6 +165,166 @@ class MetabaseServer {
     } catch (e) {
       // Ignore if session not available
     }
+  }
+
+  /**
+   * 设置 HTTP 服务器
+   */
+  private setupHttpServer() {
+    this.httpApp.use(cors());
+    this.httpApp.use(express.json());
+
+    // Health check endpoint
+    this.httpApp.get('/', (req: Request, res: Response) => {
+      res.json({ 
+        status: 'ok', 
+        service: 'metabase-server',
+        version: '0.1.0',
+        endpoints: [
+          'GET /dashboards',
+          'GET /cards',
+          'GET /databases',
+          'POST /cards/:id/execute',
+          'GET /dashboards/:id/cards',
+          'POST /query'
+        ]
+      });
+    });
+
+    // List dashboards
+    this.httpApp.get('/dashboards', async (req: Request, res: Response) => {
+      try {
+        if (!METABASE_API_KEY) {
+          await this.getSessionToken();
+        }
+        const response = await this.axiosInstance.get('/api/dashboard');
+        res.json(response.data);
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          res.status(error.response?.status || 500).json({ 
+            error: error.response?.data?.message || error.message 
+          });
+        } else {
+          res.status(500).json({ error: 'Internal server error' });
+        }
+      }
+    });
+
+    // List cards/questions
+    this.httpApp.get('/cards', async (req: Request, res: Response) => {
+      try {
+        if (!METABASE_API_KEY) {
+          await this.getSessionToken();
+        }
+        const filter = req.query.f || 'all';
+        const response = await this.axiosInstance.get(`/api/card?f=${filter}`);
+        res.json(response.data);
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          res.status(error.response?.status || 500).json({ 
+            error: error.response?.data?.message || error.message 
+          });
+        } else {
+          res.status(500).json({ error: 'Internal server error' });
+        }
+      }
+    });
+
+    // List databases
+    this.httpApp.get('/databases', async (req: Request, res: Response) => {
+      try {
+        if (!METABASE_API_KEY) {
+          await this.getSessionToken();
+        }
+        const response = await this.axiosInstance.get('/api/database');
+        res.json(response.data);
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          res.status(error.response?.status || 500).json({ 
+            error: error.response?.data?.message || error.message 
+          });
+        } else {
+          res.status(500).json({ error: 'Internal server error' });
+        }
+      }
+    });
+
+    // Execute a card
+    this.httpApp.post('/cards/:id/execute', async (req: Request, res: Response) => {
+      try {
+        if (!METABASE_API_KEY) {
+          await this.getSessionToken();
+        }
+        const cardId = req.params.id;
+        const parameters = req.body.parameters || {};
+        const response = await this.axiosInstance.post(`/api/card/${cardId}/query`, { parameters });
+        res.json(response.data);
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          res.status(error.response?.status || 500).json({ 
+            error: error.response?.data?.message || error.message 
+          });
+        } else {
+          res.status(500).json({ error: 'Internal server error' });
+        }
+      }
+    });
+
+    // Get dashboard cards
+    this.httpApp.get('/dashboards/:id/cards', async (req: Request, res: Response) => {
+      try {
+        if (!METABASE_API_KEY) {
+          await this.getSessionToken();
+        }
+        const dashboardId = req.params.id;
+        const response = await this.axiosInstance.get(`/api/dashboard/${dashboardId}`);
+        res.json(response.data.cards);
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          res.status(error.response?.status || 500).json({ 
+            error: error.response?.data?.message || error.message 
+          });
+        } else {
+          res.status(500).json({ error: 'Internal server error' });
+        }
+      }
+    });
+
+    // Execute SQL query
+    this.httpApp.post('/query', async (req: Request, res: Response) => {
+      try {
+        if (!METABASE_API_KEY) {
+          await this.getSessionToken();
+        }
+        const { database_id, query, native_parameters = [] } = req.body;
+        
+        if (!database_id || !query) {
+          res.status(400).json({ error: 'database_id and query are required' });
+          return;
+        }
+
+        const queryData = {
+          type: "native",
+          native: {
+            query: query,
+            template_tags: {}
+          },
+          parameters: native_parameters,
+          database: database_id
+        };
+
+        const response = await this.axiosInstance.post('/api/dataset', queryData);
+        res.json(response.data);
+      } catch (error) {
+        if (axios.isAxiosError(error)) {
+          res.status(error.response?.status || 500).json({ 
+            error: error.response?.data?.message || error.message 
+          });
+        } else {
+          res.status(500).json({ error: 'Internal server error' });
+        }
+      }
+    });
   }
 
   /**
@@ -809,6 +975,12 @@ class MetabaseServer {
 
   async run() {
     try {
+      // Start HTTP server
+      this.httpApp.listen(this.httpPort, () => {
+        this.logInfo(`HTTP server listening on port ${this.httpPort}`);
+      });
+
+      // Start MCP stdio server
       this.logInfo('Starting Metabase MCP server...');
       const transport = new StdioServerTransport();
       await this.server.connect(transport);
